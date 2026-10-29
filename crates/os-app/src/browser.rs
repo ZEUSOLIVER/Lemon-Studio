@@ -76,6 +76,101 @@ impl App {
         true
     }
 
+    /// Move the browser selection up (`dir < 0`) or down (`dir > 0`) by one visible row, keeping it in view.
+    pub(crate) fn browser_navigate(&mut self, dir: isize) {
+        let s = &mut self.state;
+        let rows = view::rows(s);
+        if rows.is_empty() {
+            self.invalidate();
+            return;
+        }
+        let n = rows.len() as isize;
+        let cur = rows
+            .iter()
+            .position(|r| Some(&r.key) == s.browser_sel.as_ref())
+            .map_or(if dir > 0 { -1 } else { n }, |i| i as isize);
+        let mut idx = cur + dir;
+        if idx < 0 {
+            idx = 0;
+        }
+        if idx >= n {
+            idx = n - 1;
+        }
+        let key = rows[idx as usize].key.clone();
+        select(s, &key);
+        reveal(s);
+        self.invalidate();
+    }
+
+    /// Expand (`expand == true`) or collapse the selected browser folder when it can be toggled.
+    pub(crate) fn browser_toggle_selected(&mut self, expand: bool) {
+        let s = &mut self.state;
+        let Some(key) = s.browser_sel.clone() else {
+            self.invalidate();
+            return;
+        };
+        let row = view::rows(s).into_iter().find(|r| r.key == key);
+        let Some(row) = row else {
+            self.invalidate();
+            return;
+        };
+        if let Some(open) = row.open {
+            if expand && !open {
+                s.browser_open.insert(key.clone());
+            } else if !expand && open {
+                s.browser_open.remove(&key);
+            }
+        }
+        s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
+        self.invalidate();
+    }
+
+    /// Activate the selected browser row with Enter, as a click would, without starting a drag.
+    pub(crate) fn browser_activate_selected(&mut self) {
+        let s = &mut self.state;
+        let Some(key) = s.browser_sel.clone() else {
+            self.invalidate();
+            return;
+        };
+        let row = view::rows(s).into_iter().find(|r| r.key == key);
+        let Some(row) = row else {
+            self.invalidate();
+            return;
+        };
+        let sample = match &row.item {
+            Item::Sample(p) => Some(p.clone()),
+            _ => None,
+        };
+        let payload = row.item.clone();
+        let has_open = row.open.is_some();
+        // Toggle open state.
+        if has_open {
+            let s = &mut self.state;
+            if !s.browser_open.remove(&key) {
+                s.browser_open.insert(key.clone());
+            }
+        }
+        // Activate payload (sample preview deferred until after the borrow ends).
+        if sample.is_none() {
+            let s = &mut self.state;
+            match payload {
+                Item::Pattern(n) => s.pattern = n,
+                Item::Channel(c) => {
+                    s.selected_channel = c;
+                    s.rack.select_only(c);
+                }
+                Item::History(e) => s.message = crate::history::go_to(s, e),
+                _ => {}
+            }
+        }
+        let s = &mut self.state;
+        s.browser_scroll = s.browser_scroll.min(view::max_scroll(s));
+        self.invalidate();
+        if let Some(path) = sample {
+            self.preview_sample(&path);
+        }
+    }
+
     /// Clicking a sample plays it once (spec §7): cut off after `PREVIEW_LIMIT` unless "Full sample preview" is ticked.
     pub(crate) fn preview_sample(&self, path: &str) {
         let mut p = crate::app::preview_project(path);
@@ -199,6 +294,33 @@ impl App {
             Key::Character(c) if over && ctrl && c.eq_ignore_ascii_case("r") => Some(BCmd::Reread),
             _ => None,
         };
+        // Plain arrow keys navigate the visible browser tree (spec: ui/browser.md). Handled here so they do not fall
+        // through to the canvas / piano roll while the pointer is over the browser.
+        if cmd.is_none() {
+            match key {
+                Key::Named(NamedKey::ArrowUp) if over && !ctrl && !shift && !alt => {
+                    self.browser_navigate(-1);
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowDown) if over && !ctrl && !shift && !alt => {
+                    self.browser_navigate(1);
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowLeft) if over && !ctrl && !shift && !alt => {
+                    self.browser_toggle_selected(false);
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowRight) if over && !ctrl && !shift && !alt => {
+                    self.browser_toggle_selected(true);
+                    return true;
+                }
+                Key::Named(NamedKey::Enter) if over && !ctrl && !alt => {
+                    self.browser_activate_selected();
+                    return true;
+                }
+                _ => {}
+            }
+        }
         if let Some(c) = cmd {
             if let Some(m) = self.browser_cmd(c) {
                 self.state.message = Some(m);
@@ -221,6 +343,22 @@ impl App {
                     s.browser_search.pop();
                 }
                 Key::Named(NamedKey::Space) => s.browser_search.push(' '),
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.browser_navigate(-1);
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowDown) => {
+                    self.browser_navigate(1);
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowLeft) => {
+                    self.browser_toggle_selected(false);
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    self.browser_toggle_selected(true);
+                    return true;
+                }
                 Key::Character(c) if !ctrl && !alt => s.browser_search.push_str(c),
                 _ => return false,
             }
